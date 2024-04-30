@@ -8,3 +8,10 @@ todos:
 - uaplease
 - nuforc
 - mufon
+
+## usage
+
+```python
+from pyuap import data
+reports = data.WaterUFONet(buffer_time=10).get_case_reports()
+```
