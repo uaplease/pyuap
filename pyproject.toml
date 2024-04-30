@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "pyuap"
+version = "0.1.0"
+description = "Python Utilities and Analysis Package for Unidentified Anomalous Phenomena"
+authors = ["uaplease <research@uaplease.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+pandas = "^2.2.2"
+requests = "^2.31.0"
+arrow = "^1.3.0"
+bs4 = "^0.0.2"
+ruff = "^0.4.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
