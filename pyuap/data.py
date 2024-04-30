@@ -4,6 +4,9 @@ import bs4
 import pandas as pd
 from typing import List
 
+import time
+import arrow
+
 
 class WaterUFONet:
     """
@@ -12,27 +15,32 @@ class WaterUFONet:
     Credit to the late Carl Feindt for his work cataloging UFO sightings over water.
     """
 
-    def __init__(self):
+    def __init__(self, max_failures: int = 10, buffer_time: float = 10):
+        if buffer_time < 10:
+            raise ValueError("Buffer time must be at least 10 seconds.")
         # base url for waterufo
         self.url = "http://www.waterufo.net/2012/search.php?txtSearch=all"
 
         # available snapshot dates
         self.snapshot_dates = [
-            "20130902194856",
-            "20140916023935",
-            "20150507185325",
-            "20150908120644",
-            "20160904220814",
-            "20171112174144",
-            "20181221230434",
-            "20191010100225",
             "20191022061839",
+            "20191010100225",
+            "20181221230434",
+            "20171112174144",
+            "20160904220814",
+            "20150908120644",
+            "20150507185325",
+            "20140916023935",
+            "20130902194856",
         ]
 
         # web archive snapshots
         self.snapshots = [
             f"https://web.archive.org/web/{dt}/{self.url}" for dt in self.snapshot_dates
         ]
+
+        self.max_failures = max_failures
+        self.buffer_time = buffer_time
 
     def process_snapshot(self, snapshot: str) -> pd.DataFrame:
         """
@@ -94,7 +102,7 @@ class WaterUFONet:
 
         return result
 
-    def run(self, n_snapshots: int = 1) -> List[pd.DataFrame]:
+    def get_case_tables(self, n_snapshots: int = 1) -> List[pd.DataFrame]:
         """
         Run the scraper and process the specified number of snapshots.
         """
@@ -109,3 +117,66 @@ class WaterUFONet:
             print(e)
 
         return frames
+
+    def get_case_report(self, link: str) -> str:
+        """
+        Get the full case report from the archived link.
+        """
+        time.sleep(self.buffer_time)
+        response = requests.get(link)
+        response.raise_for_status()
+        soup = bs4.BeautifulSoup(response.content, "html.parser")
+        paras = soup.find_all("p")
+        txt = ""
+        for p in paras:
+            txt += (
+                p.get_text().replace("\xa0", "").replace("\n", "").replace("\x96", "")
+            )
+
+        return txt
+
+    def get_case_reports(self) -> List[dict]:
+        """
+        Get the full case reports for all cases in the archive.
+        """
+        case_tables = self.get_case_tables(n_snapshots=1)
+        start_time = arrow.now()
+        total_time, failures, results = 0, 0, []
+        for table in case_tables:
+            table_links = table["link"]
+            for idx, link in enumerate(table_links):
+                report_start_time = arrow.now()
+                try:
+                    report = self.get_case_report(link)
+                except Exception as e:
+                    print(f"Error fetching report from {link}. Skipping to next.")
+                    print(e)
+                    failures += 1
+                    if failures >= self.max_failures:
+                        print(f"Max failures reached. Exiting.")
+                        return results
+                    continue
+
+                report_end_time = arrow.now()
+                report_time = (
+                    report_end_time - report_start_time
+                ).total_seconds() - self.buffer_time
+                total_time += report_time
+
+                average_time_per_report = total_time / (idx + 1)
+                remaining_reports = len(table_links) - (idx + 1)
+
+                expected_end_time = report_end_time.shift(
+                    seconds=(average_time_per_report + self.buffer_time)
+                    * remaining_reports
+                )
+                print(
+                    f"Processed Report: {idx + 1} / {len(table_links)}, average time: {average_time_per_report:.2f} seconds, "
+                    f"Expected end time: {expected_end_time.format('YYYY-MM-DD HH:mm:ss')}"
+                )
+                results.append({"link": link, "report": report})
+
+        end_time = arrow.now()
+        total_time = (end_time - start_time).total_seconds()
+        print(f"Total time taken: {total_time:.2f} seconds")
+        return results
