@@ -5,6 +5,7 @@ import pandas as pd
 from typing import List
 import os
 from pathlib import Path
+import json
 import time
 from openai import OpenAI
 import arrow
@@ -198,6 +199,8 @@ class FAADroneSightings:
             "https://www.faa.gov/uas/resources/public_records/uas_sightings_report"
         )
 
+        self.df = None
+
     def get_file_links(self):
         response = requests.get(self.url)
         response.raise_for_status()
@@ -272,15 +275,31 @@ class FAADroneSightings:
             system_prompts = [
                 {
                     "role": "system",
-                    "content": "You are a helpful assistant designed to output JSON.",
+                    "content": "You are a helpful assistant designed to output JSON. Always respond with your analysis in JSON format.",
                 },
                 {
                     "role": "system",
-                    "content": "Respond with your analysis in JSON format.",
+                    "content": "The JSON schema should strictly include {'altitude': int, 'reported_by_pilot': binary, 'evasive_action_taken': binary, 'authorities_notified': binary, 'shape': string, 'color': string, 'report_quality': string}.",
                 },
                 {
                     "role": "system",
-                    "content": "The JSON schema should include {'altitude': int, 'pilot_report': boolean, 'evasive_action': boolean}.",
+                    "content": "In this case binary means 1 for true and 0 for false, using integer values only.",
+                },
+                {
+                    "role": "system",
+                    "content": "In this case report_quality should be a string with one of the following values: 'low', 'medium', 'high'.",
+                },
+                {
+                    "role": "system",
+                    "content": "Low means there aren't many details in the report, medium means there are some details, and high means the visual details are very clear.",
+                },
+                {
+                    "role": "system",
+                    "content": "If an attribute is too ambiguous or is not specified at all, it's value must be null.",
+                },
+                {
+                    "role": "system",
+                    "content": "Your JSON response must be a list of dictionaries that adhere to the schema, one for each summary.",
                 },
                 {
                     "role": "system",
@@ -288,7 +307,7 @@ class FAADroneSightings:
                 },
                 {
                     "role": "system",
-                    "content": "Pay special attention to any mentions of FEET or ALTITUDE in the summary.",
+                    "content": "Pay special attention to any mentions of FEET or ALTITUDE in the summary. These are likely to be the most relevant indicators of the object's altitude.",
                 },
                 {
                     "role": "system",
@@ -305,6 +324,10 @@ class FAADroneSightings:
                 {
                     "role": "system",
                     "content": "Most of the summaries are from the pilots themselves but occasionally it's from the flight control operator or other sources.",
+                },
+                {
+                    "role": "system",
+                    "content": "Summaries with the word PILOT in them are likely not reported by the pilot.",
                 },
                 {
                     "role": "system",
@@ -337,3 +360,31 @@ class FAADroneSightings:
         )
 
         return [c.message.content for c in response.choices]
+
+    def sample_extract(
+        self, model: str = "gpt-3.5-turbo-0125", choices: int = 1, n: int = 5
+    ):
+        if self.df is None:
+            self.df = self.read_files()
+        summaries = self.sample_summaries(df=self.df, n=n)
+        choices = self.extract_jsons(summaries, model=model, choices=choices)
+
+        resp = list(json.loads(choices[0]).values())
+
+        if isinstance(resp[0], list):
+            resp = resp[0]
+
+        if len(resp) != len(summaries):
+            print(
+                "Error extracting JSON data. Summary and response sizes do not match."
+            )
+            return None
+
+        for summary, choice in zip(summaries, resp):
+            print(f"Summary: {summary}\n")
+            print(f"Extracted JSON: {choice}\n")
+            print("-" * 50)
+            user_decision = input(
+                "Keep (1) / Next Extract Choice (2) / Next Report (3): "
+            )
+        return
