@@ -2,10 +2,11 @@ import requests
 
 import bs4
 import pandas as pd
-from typing import List
+from typing import List, Tuple
 import os
 from pathlib import Path
 import json
+from collections import defaultdict
 import time
 from openai import OpenAI
 import arrow
@@ -229,7 +230,30 @@ class FAADroneSightings:
             time.sleep(self.buffer_time)
         print("Download complete.")
 
-    def read_files(self, path: str = "data") -> pd.DataFrame:
+    def file_adapter(
+        self, df: pd.DataFrame, coltuple: tuple
+    ) -> Tuple[bool, pd.DataFrame]:
+        skip = True
+        if coltuple in [
+            ("Date", "State", "City", "Summary"),
+            ("Day of Sighting", "State", "City", "Summary"),
+            ("Date of Sighting", "State", "City", "Summary"),
+            ("Date of Sighting", "State", "City", "Summary"),
+            ("Day of Date of Sighting", "State", "City", "Summary"),
+        ]:
+            df.columns = ["date", "state", "city", "summary"]
+            skip = False
+
+        elif coltuple in [("Date of Sighting", "City", "State", "Summary")]:
+            df.columns = ["date", "city", "state", "summary"]
+            df = df[["date", "state", "city", "summary"]]
+            skip = False
+
+        return skip, df
+
+    def read_files(
+        self, path: str = "data", columns_only: bool = False
+    ) -> pd.DataFrame:
         pth = Path(os.getcwd()) / path
         files = list(pth.glob("*.xlsx"))
         if not files:
@@ -237,19 +261,26 @@ class FAADroneSightings:
             return None
 
         dfs = []
+        dfs_by_cols = defaultdict(list)
         for file in files:
             try:
                 df = pd.read_excel(file, engine="openpyxl")
-                dfs.append(df)
             except Exception as e:
                 print(f"Error reading file {file}. Skipping.")
                 print(e)
                 continue
 
+            skip, df = self.file_adapter(df, tuple(list(df.columns)))
+            if skip:
+                continue
+            dfs.append(df)
+
+        for k, v in dfs_by_cols.items():
+            print(k, len(v))
+
         if not dfs:
             print("No files successfully read.")
             return None
-
         try:
             df = pd.concat(dfs, axis=0).reset_index(drop=True)
         except Exception as e:
@@ -260,7 +291,7 @@ class FAADroneSightings:
         return df
 
     def sample_summaries(self, df: pd.DataFrame, n: int = 5) -> List[str]:
-        return [s for s in df["Summary"].dropna().sample(n).values]
+        return [s for s in df["summary"].dropna().sample(n).values]
 
     def extract_jsons(
         self,
