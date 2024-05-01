@@ -3,8 +3,11 @@ import requests
 import bs4
 import pandas as pd
 from typing import List
-
+import os
+from pathlib import Path
+import json
 import time
+from openai import OpenAI
 import arrow
 
 
@@ -180,3 +183,208 @@ class WaterUFONet:
         total_time = (end_time - start_time).total_seconds()
         print(f"Total time taken: {total_time:.2f} seconds")
         return results
+
+
+class FAADroneSightings:
+    def __init__(self, buffer_time: int = 10):
+        if buffer_time < 10:
+            raise ValueError(
+                "Buffer time must be at least 10 seconds for this scraper."
+            )
+
+        self.buffer_time = buffer_time
+        self.base = "https://www.faa.gov"
+
+        self.url = (
+            "https://www.faa.gov/uas/resources/public_records/uas_sightings_report"
+        )
+
+        self.df = None
+
+    def get_file_links(self):
+        response = requests.get(self.url)
+        response.raise_for_status()
+        soup = bs4.BeautifulSoup(response.content, "html.parser")
+        links = soup.find_all("a")
+        file_links = [
+            self.base + link["href"]
+            for link in links
+            if link.text.startswith("Reported UAS Sightings")
+        ]
+        return file_links
+
+    def download_files(self, path: str = "data"):
+        file_links = self.get_file_links()
+        for idx, link in enumerate(file_links):
+            response = requests.get(link)
+            response.raise_for_status()
+            ftype = link.split(".")[-1]
+            if not ftype.startswith("x"):
+                print(f"Cannot download link {link}. Skipping.")
+                continue
+            pth = Path(os.getcwd()) / path / f"uas_sightings_report_{idx}.{ftype}"
+            with open(pth, "wb") as f:
+                f.write(response.content)
+            print(f"Downloaded file: {pth}")
+            time.sleep(self.buffer_time)
+        print("Download complete.")
+
+    def read_files(self, path: str = "data") -> pd.DataFrame:
+        pth = Path(os.getcwd()) / path
+        files = list(pth.glob("*.xlsx"))
+        if not files:
+            print("No files found in the specified directory.")
+            return None
+
+        dfs = []
+        for file in files:
+            try:
+                df = pd.read_excel(file, engine="openpyxl")
+                dfs.append(df)
+            except Exception as e:
+                print(f"Error reading file {file}. Skipping.")
+                print(e)
+                continue
+
+        if not dfs:
+            print("No files successfully read.")
+            return None
+
+        try:
+            df = pd.concat(dfs, axis=0).reset_index(drop=True)
+        except Exception as e:
+            print("Error concatenating dataframes.")
+            print(e)
+            return None
+
+        return df
+
+    def sample_summaries(self, df: pd.DataFrame, n: int = 5) -> List[str]:
+        return [s for s in df["Summary"].dropna().sample(n).values]
+
+    def extract_jsons(
+        self,
+        summaries: List[str],
+        model: str = "gpt-3.5-turbo-0125",
+        choices: int = 1,
+        system_prompts: List[str] = None,
+    ) -> List[dict]:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+        if system_prompts is None:
+            system_prompts = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant designed to output JSON. Always respond with your analysis in JSON format.",
+                },
+                {
+                    "role": "system",
+                    "content": "The JSON schema should strictly include {'altitude': int, 'reported_by_pilot': binary, 'evasive_action_taken': binary, 'authorities_notified': binary, 'shape': string, 'color': string, 'report_quality': string}.",
+                },
+                {
+                    "role": "system",
+                    "content": "In this case binary means 1 for true and 0 for false, using integer values only.",
+                },
+                {
+                    "role": "system",
+                    "content": "In this case report_quality should be a string with one of the following values: 'low', 'medium', 'high'.",
+                },
+                {
+                    "role": "system",
+                    "content": "Low means there aren't many details in the report, medium means there are some details, and high means the visual details are very clear.",
+                },
+                {
+                    "role": "system",
+                    "content": "If an attribute is too ambiguous or is not specified at all, it's value must be null.",
+                },
+                {
+                    "role": "system",
+                    "content": "Your JSON response must be a list of dictionaries that adhere to the schema, one for each summary.",
+                },
+                {
+                    "role": "system",
+                    "content": "You are an expert at assessing object altitude from potentially ambiguous text.",
+                },
+                {
+                    "role": "system",
+                    "content": "Pay special attention to any mentions of FEET or ALTITUDE in the summary. These are likely to be the most relevant indicators of the object's altitude.",
+                },
+                {
+                    "role": "system",
+                    "content": "You will be shown a series of report summaries from the FAA Drone Sightings dataset.",
+                },
+                {
+                    "role": "system",
+                    "content": "For each summary you are tasked with estimating the altitude of the unidentified object in question.",
+                },
+                {
+                    "role": "system",
+                    "content": "Sometimes there will be multiple altitudes mentioned and it's critical you extract the most relevant one for the unidentified object.",
+                },
+                {
+                    "role": "system",
+                    "content": "Most of the summaries are from the pilots themselves but occasionally it's from the flight control operator or other sources.",
+                },
+                {
+                    "role": "system",
+                    "content": "Summaries with the word PILOT in them are likely not reported by the pilot.",
+                },
+                {
+                    "role": "system",
+                    "content": "The JSON output length must match the number of summaries shown.",
+                },
+            ]
+
+        summary_prompts = [
+            {
+                "role": "user",
+                "content": f"Here are {len(summaries)} summaries from the FAA Drone Sightings dataset.",
+            }
+        ]
+
+        for summary in summaries:
+            summary_prompts.append({"role": "user", "content": summary})
+
+        summary_prompts.append(
+            {
+                "role": "user",
+                "content": "Take a deep breath and solve the problem step by step. It's important you get this right.",
+            }
+        )
+
+        response = client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=system_prompts + summary_prompts,
+            n=choices,
+        )
+
+        return [c.message.content for c in response.choices]
+
+    def sample_extract(
+        self, model: str = "gpt-3.5-turbo-0125", choices: int = 1, n: int = 5
+    ):
+        if self.df is None:
+            self.df = self.read_files()
+        summaries = self.sample_summaries(df=self.df, n=n)
+        choices = self.extract_jsons(summaries, model=model, choices=choices)
+
+        resp = list(json.loads(choices[0]).values())
+
+        if isinstance(resp[0], list):
+            resp = resp[0]
+
+        if len(resp) != len(summaries):
+            print(
+                "Error extracting JSON data. Summary and response sizes do not match."
+            )
+            return None
+
+        for summary, choice in zip(summaries, resp):
+            print(f"Summary: {summary}\n")
+            print(f"Extracted JSON: {choice}\n")
+            print("-" * 50)
+            user_decision = input(
+                "Keep (1) / Next Extract Choice (2) / Next Report (3): "
+            )
+        return
