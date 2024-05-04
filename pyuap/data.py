@@ -203,16 +203,32 @@ class FAADroneSightings:
         self.df = None
 
     def get_file_links(self):
+        def _extract_links(response, pattern="Reported UAS Sightings"):
+            soup = bs4.BeautifulSoup(response.content, "html.parser")
+            links = soup.find_all("a")
+            file_links = [
+                self.base + link["href"]
+                for link in links
+                if link.text.startswith(pattern)
+            ]
+            return file_links
+
         response = requests.get(self.url)
         response.raise_for_status()
-        soup = bs4.BeautifulSoup(response.content, "html.parser")
-        links = soup.find_all("a")
-        file_links = [
-            self.base + link["href"]
-            for link in links
-            if link.text.startswith("Reported UAS Sightings")
-        ]
-        return file_links
+
+        file_links = _extract_links(response)
+
+        # add handling for embedded links..
+        remove = set()
+        for link in file_links:
+            fname = link.split("/")[-1]
+            if fname.startswith("fy22-"):
+                remove.add(link)
+                response = requests.get(link)
+                response.raise_for_status()
+                file_links += _extract_links(response, pattern="Reported-UAS-Sightings")
+
+        return list(set(file_links) - remove)
 
     def download_files(self, path: str = "data"):
         file_links = self.get_file_links()
@@ -220,9 +236,9 @@ class FAADroneSightings:
             response = requests.get(link)
             response.raise_for_status()
             ftype = link.split(".")[-1]
-            if not ftype.startswith("x"):
-                print(f"Cannot download link {link}. Skipping.")
-                continue
+            if ftype not in ["xlsx", "xls"]:
+                ftype = "xlsx"
+
             pth = Path(os.getcwd()) / path / f"uas_sightings_report_{idx}.{ftype}"
             with open(pth, "wb") as f:
                 f.write(response.content)
@@ -233,23 +249,50 @@ class FAADroneSightings:
     def file_adapter(
         self, df: pd.DataFrame, coltuple: tuple
     ) -> Tuple[bool, pd.DataFrame]:
-        skip = True
-        if coltuple in [
-            ("Date", "State", "City", "Summary"),
-            ("Day of Sighting", "State", "City", "Summary"),
-            ("Date of Sighting", "State", "City", "Summary"),
-            ("Date of Sighting", "State", "City", "Summary"),
-            ("Day of Date of Sighting", "State", "City", "Summary"),
-        ]:
-            df.columns = ["date", "state", "city", "summary"]
-            skip = False
+        # Mapping of standard column names to their possible aliases
+        column_mapping = {
+            "date": [
+                "Date",
+                "Day of Sighting",
+                "Date of Sighting",
+                "Date of Sighitng",
+                "Day of Date of Sighting",
+                "Event Date & Time",
+                "Event Date",
+                "EventDATETIME",
+                "Event DATETIME",
+                "spEventDateTime",
+            ],
+            "state": ["State", "STATE", "LocationSTATE", "spState", "Location STATE"],
+            "city": ["City", "CITY", "LocationCITY", "spCity", "Location CITY"],
+            "summary": [
+                "Summary",
+                "Event Description",
+                "EventREPORTNARRATIVE",
+                "Description",
+                "Redacted",
+            ],
+        }
 
-        elif coltuple in [("Date of Sighting", "City", "State", "Summary")]:
-            df.columns = ["date", "city", "state", "summary"]
-            df = df[["date", "state", "city", "summary"]]
-            skip = False
+        # Flatten mapping to single-level dictionary for column renaming
+        flat_aliases = {
+            alias: standard
+            for standard, aliases in column_mapping.items()
+            for alias in aliases
+        }
 
-        return skip, df
+        # Rename columns based on aliases
+        df.rename(columns=flat_aliases, inplace=True)
+        required_columns = {"date", "state", "city", "summary"}
+
+        # Check if the necessary columns are present and select them
+        if required_columns.issubset(df.columns):
+            return False, df[list(required_columns)]
+        else:
+            print(
+                f"Missing required columns in DataFrame. Available columns: {df.columns}"
+            )
+            return True, df
 
     def read_files(
         self, path: str = "data", columns_only: bool = False
@@ -272,6 +315,7 @@ class FAADroneSightings:
 
             skip, df = self.file_adapter(df, tuple(list(df.columns)))
             if skip:
+                print(f"Skipping {file} due to unknown column format.")
                 continue
             dfs.append(df)
 
